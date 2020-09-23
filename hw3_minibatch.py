@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from my_neural_networks import utils, networks, mnist
 from my_neural_networks.minibatcher import MiniBatcher
 from my_neural_networks.optimizers import SGDOptimizer, MomentumOptimizer, NesterovOptimizer, AdamOptimizer
-
+from my_neural_networks import CNN_networks
 
 def get_arguments(argv):
     parser = argparse.ArgumentParser(description='Training for MNIST')
@@ -41,11 +41,16 @@ def get_arguments(argv):
                         help='the co-efficient of L2 regularization (DEFAULT: 0)')
     parser.add_argument('-o', '--dropout_rate', type=float, default=0,
                         help='dropout rate for each layer (DEFAULT: 0)')
-
     parser.add_argument('-v', '--verbose', action='store_true', default=False,
                         help='show info messages')
     parser.add_argument('-d', '--debug', action='store_true', default=False,
                         help='show debug messages')
+    parser.add_argument('-c', '--CNN', action='store_true', default=False,
+                        help='use CNN')
+    parser.add_argument('-s', '--shuffleCNN', action='store_true', default=False,
+                        help='use shuffleCNN')
+    parser.add_argument('-f', '--flatness_CNN', action='store_true', default=False,
+                        help='flatness_CNN')
     args = parser.parse_args(argv)
     return args
 
@@ -107,11 +112,16 @@ def create_model(shape):
                                   beta2=0.999)
     else:
         raise NotImplementedError("Only support momentum, nesterov, or adam")
-    model = networks.BasicNeuralNetwork(shape,
-                                        optimizer=optimizer,
-                                        l2_lambda=args.l2_lambda,
-                                        dropout_rate=args.dropout_rate,
-                                        gpu_id=args.gpu_id)
+    if args.CNN==False:
+        model = networks.BasicNeuralNetwork(shape,
+                                            optimizer=optimizer,
+                                            l2_lambda=args.l2_lambda,
+                                            dropout_rate=args.dropout_rate,
+                                            gpu_id=args.gpu_id)
+    elif args.CNN==True:
+        model = CNN_networks.Net2(gpu_id=args.gpu_id)
+    else:
+        raise NotImplementedError("Only support ff or cnn")
     return model
 
 
@@ -121,7 +131,14 @@ def main():
 
     # load data
     X_train, y_train = mnist.load_train_data(args.data_folder, max_n_examples=args.n_training_examples)
+
+    #if suffle
+    if args.shuffleCNN == True:
+        np.random.shuffle(y_train)
+
     X_test, y_test = mnist.load_test_data(args.data_folder)
+    if args.shuffleCNN == True:
+        np.random.shuffle(y_test)
 
     # reshape the images into one dimension
     X_train = X_train.reshape((X_train.shape[0], -1))
@@ -154,6 +171,13 @@ def main():
     # create model
     model = create_model(shape)
 
+    if args.flatness_CNN == True:
+        paramsinitial = model.model.named_parameters()
+        initial_params = {}
+        for name, param in paramsinitial:
+            initial_params[name] = param.data.clone()
+
+    ##
     # start training
     losses = []
     train_accs = []
@@ -185,13 +209,23 @@ def main():
                 logging.info("Accuracy(train) = {}".format(train_acc))
                 logging.info("Accuracy(test) = {}".format(test_acc))
                 count=count+1;
-                print("running....................", i_epoch, count)
+              #  print("loss:",loss)
+               # print("train Acc", train_acc)
+              #  print("test Acc", test_acc)
+                #print("running....................", i_epoch, count)
             # collect results for plotting for each epoch
+            y_train_pred = model.predict(X_train)
+            y_test_pred = model.predict(X_test)
+            train_acc = utils.accuracy(y_train, y_train_pred)
+            test_acc = utils.accuracy(y_test, y_test_pred)
             loss = model.loss(X_train, y_train, y_train_1hot)
             losses.append(loss)
             train_accs.append(train_acc)
             test_accs.append(test_acc)
-            print("done....................")
+            print("loss:",loss)
+            print("train Acc", train_acc)
+            print("test Acc", test_acc)
+            print("done....................", i_epoch)
 
         """
         # Please write your code here to complete the minibatch training.
@@ -230,9 +264,41 @@ def main():
             logging.info("Accuracy(train) = {}".format(train_acc))
             logging.info("Accuracy(test) = {}".format(test_acc))
             logging.info("Elapse {} seconds".format(time.time() - t_start))
-
+            print("loss:", loss)
+            print("train Acc", train_acc)
+            print("test Acc", test_acc)
     # ======================================================================
-    
+    # Save final model parameters
+    if args.flatness_CNN == True:
+        paramsfinal = model.model.named_parameters()
+        final_params = {}
+        for name, param in paramsfinal:
+            final_params[name] = param.data.clone()
+
+    if args.flatness_CNN == True:
+        v_err = []
+        alpha_v = []
+
+        # Interpolate model parameters
+        for alpha in torch.linspace(0, 1.5, steps=10):
+            if(args.gpu_id!=-1):
+                alpha = alpha.cuda(args.gpu_id)
+            for name, param in model.model.named_parameters():
+                param.data = (1. - alpha) * initial_params[name].data + alpha * final_params[name].data
+            y_train_pred = model.predict(X_train)
+            train_acc = utils.accuracy(y_train, y_train_pred)
+            v_err.append(100 - train_acc*100)
+            alpha_v.append(alpha)
+            print(f' alpha = {alpha} has validation error {v_err[-1]}%')
+
+        #plt.rcParams.update({'font.size': 22})
+        plt.xlabel("Alpha")
+        plt.ylabel("Validation Error (%)")
+        plt.semilogy(alpha_v, v_err, linestyle='-', marker='o', color='b')
+        #plt.show()
+        plt.savefig("flatness.png")
+
+
     # plot
     save_plots(losses, train_accs, test_accs)
 
